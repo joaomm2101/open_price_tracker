@@ -341,3 +341,185 @@ class TestPriceHistory:
 
     def test_product_not_found(self, client):
         assert client.get("/products/99/prices/history").status_code == 404
+
+
+CSV_HEADER = "product_name,brand,unit,store_name,city,price,date"
+
+
+def upload(client, text, *, encoding="utf-8", name="prices.csv", **params):
+    query = "&".join(f"{k}={str(v).lower()}" for k, v in params.items())
+    return client.post(
+        f"/imports?{query}", files={"file": (name, text.encode(encoding), "text/csv")}
+    )
+
+
+class TestImportEndpoint:
+    GOOD = f"{CSV_HEADER}\nMilk 1L,Brand C,l,Store C,City C,5.49,{iso(1)}\n"
+
+    def test_check_is_the_default_and_saves_nothing(self, client, session):
+        r = upload(client, self.GOOD)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["dry_run"] is True
+        assert (body["read"], body["created"], body["new_products"], body["new_stores"]) == (1, 1, 1, 1)
+        assert body["filename"] == "prices.csv"
+        assert body["columns"]["location"] == "city"
+        assert session.exec(select(Product).where(Product.name == "Milk 1L")).first() is None
+
+    def test_real_import_saves(self, client, session):
+        r = upload(client, self.GOOD, dry_run=False)
+        assert r.status_code == 200
+        assert r.json()["dry_run"] is False
+        assert session.exec(select(Price).where(Price.price == 549)).one()
+        assert client.get("/products/3/cheapest").json()["price"] == 549
+
+    def test_import_twice_is_idempotent(self, client):
+        upload(client, self.GOOD, dry_run=False)
+        again = upload(client, self.GOOD, dry_run=False).json()
+        assert (again["created"], again["unchanged"]) == (0, 1)
+
+    def test_cents_option(self, client, session):
+        upload(client, f"{CSV_HEADER}\nMilk,B,l,S,C,549,{iso(1)}\n", dry_run=False, cents=True)
+        assert session.exec(select(Price).where(Price.price == 549)).one()
+
+    def test_rejected_rows_are_listed_with_reasons(self, client):
+        text = f"{CSV_HEADER}\nMilk,B,l,S,C,abc,{iso(1)}\nMilk,B,l,S,C,5.49,{iso(1)}\nMilk,B,l,S,C,5.49,2999-01-01\n"
+        body = upload(client, text).json()
+        assert (body["read"], body["created"], body["rejected_total"]) == (3, 1, 2)
+        assert body["rejected"][0]["line"] == 2
+        assert "price" in body["rejected"][0]["reason"]
+        assert body["rejected"][0]["row"]["product_name"] == "Milk"
+        assert "future" in body["rejected"][1]["reason"]
+
+    def test_rejected_list_is_capped(self, client):
+        rows = "\n".join(f"Item,B,l,S,C,abc,{iso(1)}" for _ in range(250))
+        body = upload(client, f"{CSV_HEADER}\n{rows}\n").json()
+        assert body["rejected_total"] == 250
+        assert len(body["rejected"]) == 200
+
+    def test_windows_1252_file_from_excel(self, client, session):
+        text = f"{CSV_HEADER}\nCafé Torrado,Marca É,g,Loja São João,Fortaleza,19.09,{iso(1)}\n"
+        r = upload(client, text, encoding="cp1252", dry_run=False)
+        assert r.status_code == 200
+        assert session.exec(select(Product).where(Product.name == "Café Torrado")).one().brand == "Marca É"
+
+    def test_semicolon_and_portuguese_headers(self, client):
+        text = f"produto;marca;loja;cidade;preco;data\nLeite;X;Y;Z;5,49;{iso(1)}\n"
+        body = upload(client, text).json()
+        assert (body["created"], body["rejected_total"]) == (1, 0)
+
+    def test_missing_columns_is_422_with_the_headers_found(self, client):
+        r = upload(client, "foo,bar\n1,2\n")
+        assert r.status_code == 422
+        assert "missing columns" in r.json()["detail"] and "foo" in r.json()["detail"]
+
+    def test_empty_file(self, client):
+        assert upload(client, "").status_code == 422
+
+    def test_header_only_file(self, client):
+        body = upload(client, f"{CSV_HEADER}\n").json()
+        assert (body["read"], body["created"]) == (0, 0)
+
+    def test_binary_garbage_does_not_crash(self, client):
+        r = client.post("/imports", files={"file": ("x.csv", bytes(range(256)) * 20, "text/csv")})
+        assert r.status_code in (200, 422)
+
+    def test_too_large(self, client, monkeypatch):
+        from app import main
+
+        monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 50)
+        assert upload(client, self.GOOD * 5).status_code == 413
+
+    def test_no_file(self, client):
+        assert client.post("/imports").status_code == 422
+
+    def test_html_in_a_cell_is_stored_as_plain_text(self, client, session):
+        text = f"{CSV_HEADER}\n<img src=x onerror=alert(1)>,B,l,S,C,5.49,{iso(1)}\n"
+        upload(client, text, dry_run=False)
+        assert session.exec(select(Product).where(Product.name.like("<img%"))).one()
+
+
+class TestFrontend:
+    def test_root_serves_the_page(self, client):
+        r = client.get("/")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        assert "Open Price Tracker" in r.text
+
+    def test_page_is_not_in_the_api_schema(self, client):
+        assert "/" not in client.get("/openapi.json").json()["paths"]
+
+    def test_page_only_calls_endpoints_that_exist(self, client):
+        import re
+
+        paths = client.get("/openapi.json").json()["paths"]
+        template = lambda p: re.sub(r"\{[^}]+\}", "{}", p)
+        known = {template(p) for p in paths}
+        used = set(re.findall(r"""api\(\s*[`"'](/[a-z/${}.A-Za-z]*)""", client.get("/").text))
+        used |= set(re.findall(r"""post\(\s*[`"'](/[a-z/]*)""", client.get("/").text))
+        # ${q} e ${params} são só a query string; os demais ${...} são ids.
+        normalised = {
+            re.sub(r"\$\{[^}]+\}", "{}", re.sub(r"\$\{(q|params)\}", "", u)) for u in used
+        }
+        assert normalised and normalised <= known, normalised - known
+
+
+class TestCreateProductWithStore:
+    def create(self, client, **extra):
+        return client.post("/products", json={"name": "Milk 1L", "brand": "Brand C", **extra})
+
+    def test_creates_product_and_first_price(self, client, session):
+        r = self.create(client, store_id=2, price=549, date=iso(3))
+        assert r.status_code == 201
+        body = r.json()
+        assert (body["id"], body["name"], body["brand"]) == (3, "Milk 1L", "Brand C")
+        assert body["initial_price"] == {
+            "id": 5, "product_id": 3, "store_id": 2, "price": 549, "date": iso(3),
+        }
+        stored = session.exec(select(Price).where(Price.product_id == 3)).one()
+        assert (stored.store_id, stored.price) == (2, 549)
+
+    def test_new_product_is_immediately_analysable(self, client):
+        self.create(client, store_id=2, price=549)
+        cheapest = client.get("/products/3/cheapest").json()
+        assert cheapest["price"] == 549
+        assert cheapest["store"]["name"] == "Store B"
+
+    def test_date_defaults_to_today(self, client):
+        r = self.create(client, store_id=1, price=100)
+        assert r.json()["initial_price"]["date"] == date.today().isoformat()
+
+    def test_without_store_nothing_changes(self, client, session):
+        r = self.create(client)
+        assert r.status_code == 201
+        assert "initial_price" not in r.json()
+        assert session.exec(select(Price).where(Price.product_id == 3)).first() is None
+
+    def test_unknown_store_saves_nothing(self, client, session):
+        r = self.create(client, store_id=99, price=549)
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Store not found"
+        assert session.exec(select(Product).where(Product.name == "Milk 1L")).first() is None
+
+    def test_future_date_saves_nothing(self, client, session):
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        r = self.create(client, store_id=1, price=549, date=tomorrow)
+        assert r.status_code == 400
+        assert session.exec(select(Product).where(Product.name == "Milk 1L")).first() is None
+
+    @pytest.mark.parametrize("extra", [{"store_id": 1}, {"price": 549}])
+    def test_store_and_price_must_come_together(self, client, extra):
+        r = self.create(client, **extra)
+        assert r.status_code == 422
+        assert "together" in r.text
+
+    @pytest.mark.parametrize("price", [0, -5, 5.5])
+    def test_invalid_price(self, client, price):
+        assert self.create(client, store_id=1, price=price).status_code == 422
+
+    def test_duplicate_product_adds_no_price(self, client, session):
+        r = client.post(
+            "/products", json={"name": "Rice 5kg", "brand": "Brand A", "store_id": 2, "price": 100}
+        )
+        assert r.status_code == 400
+        assert len(session.exec(select(Price)).all()) == 4

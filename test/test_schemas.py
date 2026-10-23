@@ -52,3 +52,19 @@ class TestPrice:
     def test_invalid_date(self):
         with pytest.raises(ValidationError):
             PriceCreate(product_id=1, store_id=1, price=1, date="not-a-date")
+
+
+class TestProductWithStore:
+    def test_store_and_price_together_are_valid(self):
+        p = ProductCreate(name="M", brand="B", store_id=1, price=549)
+        assert (p.store_id, p.price) == (1, 549)
+        assert p.date == date.today()
+
+    def test_neither_is_valid(self):
+        p = ProductCreate(name="M", brand="B")
+        assert (p.store_id, p.price) == (None, None)
+
+    @pytest.mark.parametrize("extra", [{"store_id": 1}, {"price": 549}])
+    def test_one_without_the_other_is_invalid(self, extra):
+        with pytest.raises(ValidationError, match="together"):
+            ProductCreate(name="M", brand="B", **extra)

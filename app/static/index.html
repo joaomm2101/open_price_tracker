@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open Price Tracker</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --text: #1b1f27; --muted: #667085;
+    --border: #e3e6eb; --accent: #1f6feb; --accent-text: #ffffff;
+    --good: #18794e; --good-bg: #e6f4ec; --bad: #b42318; --bad-bg: #fdecea;
+    --warn-bg: #fff6e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1218; --surface: #181c24; --text: #e8eaee; --muted: #98a2b3;
+      --border: #2a303b; --accent: #4c8dff; --accent-text: #0b0e13;
+      --good: #4cc38a; --good-bg: #12281d; --bad: #ff7b72; --bad-bg: #2d1715;
+      --warn-bg: #2a2412;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+    max-width: 960px; margin: 0 auto; }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--good); } .dot.down { background: var(--bad); }
+  nav { display: flex; gap: 4px; max-width: 960px; margin: 0 auto; padding: 0 16px;
+    border-bottom: 1px solid var(--border); overflow-x: auto; }
+  nav button { background: none; border: 0; border-bottom: 2px solid transparent;
+    padding: 10px 14px; color: var(--muted); font: inherit; cursor: pointer; white-space: nowrap; }
+  nav button[aria-selected="true"] { color: var(--text); border-color: var(--accent); font-weight: 600; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  section[hidden] { display: none; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 7px; padding: 8px 10px; min-width: 150px; }
+  input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.primary { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 7px;
+    padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.link { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
+  button.ghost { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 8px 12px; font: inherit; cursor: pointer; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .stat { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--bg); }
+  .stat .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .stat .v { font-size: 24px; font-weight: 700; }
+  .stat .s { font-size: 13px; color: var(--muted); }
+  .stat.best { background: var(--good-bg); border-color: transparent; }
+  .stat.best .v { color: var(--good); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .table-wrap { overflow-x: auto; }
+  .msg { padding: 10px 12px; border-radius: 8px; margin-top: 12px; }
+  .msg.ok { background: var(--good-bg); color: var(--good); }
+  .msg.err { background: var(--bad-bg); color: var(--bad); }
+  .msg.info { background: var(--warn-bg); }
+  .muted { color: var(--muted); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Open Price Tracker</h1>
+  <span class="muted" id="health-text">checking…</span><span class="dot" id="health-dot"></span>
+  <a href="/docs" class="muted">API docs</a>
+</header>
+<nav role="tablist" id="tabs"></nav>
+<main>
+
+  <section id="tab-analysis">
+    <div class="card">
+      <h2>Current prices</h2>
+      <div class="row">
+        <label>Product <select id="a-product"></select></label>
+        <label>Only prices from the last (days)
+          <input id="a-days" type="number" min="1" max="365" value="30"></label>
+        <button class="primary" id="a-go">Analyse</button>
+      </div>
+      <p class="hint">Uses each store's latest price inside the window, so old prices that may no longer be available are ignored.</p>
+      <div id="a-out"></div>
+    </div>
+
+    <div class="card">
+      <h2>History for any period</h2>
+      <div class="row">
+        <label>Product <select id="h-product"></select></label>
+        <label>From <input id="h-start" type="date"></label>
+        <label>To <input id="h-end" type="date"></label>
+        <label>or a whole year <input id="h-year" type="number" min="1900" max="2999" placeholder="2014"></label>
+        <button class="primary" id="h-go">Search</button>
+      </div>
+      <p class="hint">Cheapest price ever recorded in the period. Leave a date empty for an open-ended period.</p>
+      <div id="h-out"></div>
+    </div>
+  </section>
+
+  <section id="tab-add" hidden>
+    <div class="card">
+      <h2>Add a price</h2>
+      <form id="p-form" class="row">
+        <label>Product <select id="p-product" required></select></label>
+        <label>Store <select id="p-store" required></select></label>
+        <label>Price (R$) <input id="p-price" inputmode="decimal" placeholder="20,50" required></label>
+        <label>Date <input id="p-date" type="date" required></label>
+        <button class="primary" type="submit">Save price</button>
+      </form>
+      <p class="hint">Type the price in reais (20,50 or 20.50). It is stored as integer cents (2050).</p>
+      <div id="p-out"></div>
+    </div>
+  </section>
+
+  <section id="tab-products" hidden>
+    <div class="card">
+      <h2>New product</h2>
+      <form id="prod-form" class="row">
+        <label>Name <input id="prod-name" required placeholder="Rice 5kg"></label>
+        <label>Brand <input id="prod-brand" required placeholder="Brand A"></label>
+        <label>Store (optional) <select id="prod-store"></select></label>
+        <label>Price (R$) <input id="prod-price" inputmode="decimal" placeholder="20,50" disabled></label>
+        <label>Date <input id="prod-date" type="date" disabled></label>
+        <button class="primary" type="submit">Add product</button>
+      </form>
+      <p class="hint">Pick a store to record where the product was seen. That needs its price there (and the date), because a product is linked to a store through a price. Leave the store empty to add only the product.</p>
+      <div id="prod-out"></div>
+    </div>
+    <div class="card"><h2>Products</h2><div class="table-wrap" id="prod-table"></div></div>
+  </section>
+
+  <section id="tab-stores" hidden>
+    <div class="card">
+      <h2>New store</h2>
+      <form id="store-form" class="row">
+        <label>Name <input id="store-name" required placeholder="Super Praia"></label>
+        <label>Location <input id="store-location" required placeholder="Fortaleza"></label>
+        <button class="primary" type="submit">Add store</button>
+      </form>
+      <div id="store-out"></div>
+    </div>
+    <div class="card"><h2 id="store-title">Stores</h2><div class="table-wrap" id="store-table"></div></div>
+    <div class="card" id="store-prices-card" hidden>
+      <h2 id="store-prices-title"></h2>
+      <div class="row"><label>Only prices from the last (days)
+        <input id="sp-days" type="number" min="1" max="365" value="30"></label>
+        <button class="ghost" id="sp-go">Refresh</button></div>
+      <div class="table-wrap" id="store-prices"></div>
+    </div>
+  </section>
+
+  <section id="tab-import" hidden>
+    <div class="card">
+      <h2>Load a CSV file</h2>
+      <div class="row">
+        <label>CSV file <input id="i-file" type="file" accept=".csv,.tsv,.txt,text/csv"></label>
+        <label style="flex-direction:row;align-items:center;gap:8px">
+          <input id="i-cents" type="checkbox" style="min-width:0"> Prices are already in cents (2050 = 20,50)</label>
+        <button class="primary" id="i-check" disabled>Check file</button>
+        <button class="primary" id="i-import" disabled>Import</button>
+      </div>
+      <p class="hint">Needed columns: product (or product_name), brand, store (or store_name), location (or city), price, date.
+        Extra columns are ignored. Dates as YYYY-MM-DD or DD/MM/YYYY. <b>Check file</b> only reports what would happen; nothing is saved until you press <b>Import</b>.</p>
+      <div id="i-out"></div>
+    </div>
+  </section>
+
+</main>
+<script>
+"use strict";
+
+// ---------- helpers ----------
+const $ = (sel) => document.querySelector(sel);
+
+// Builds DOM with text nodes only, so data from the database can never inject HTML.
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c !== null && c !== undefined) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+const clear = (el) => el.replaceChildren();
+const money = (cents) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents / 100);
+const showDate = (iso) => (iso ? iso.split("-").reverse().join("/") : "…");
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
+// "20,50", "R$ 1.299,90", "20.5" -> integer cents (no floating point involved)
+function parseCents(raw) {
+  const t = String(raw).replace(/[^\d.,]/g, "");
+  if (!t) throw new Error("Enter a price.");
+  const last = Math.max(t.lastIndexOf(","), t.lastIndexOf("."));
+  let whole = t, dec = "";
+  if (last !== -1 && t.length - last - 1 <= 2) { whole = t.slice(0, last); dec = t.slice(last + 1); }
+  const cents = parseInt(whole.replace(/[.,]/g, "") || "0", 10) * 100 + parseInt((dec + "00").slice(0, 2), 10);
+  if (!(cents > 0)) throw new Error("Price must be greater than zero.");
+  return cents;
+}
+
+class ApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
+
+async function api(path, options) {
+  let res;
+  try {
+    res = await fetch(path, options);
+  } catch {
+    throw new ApiError(0, "Cannot reach the API. Is the server running?");
+  }
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    let detail = body && body.detail;
+    if (Array.isArray(detail)) detail = detail.map((d) => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("; ");
+    throw new ApiError(res.status, detail || `Request failed (${res.status})`);
+  }
+  return body;
+}
+const post = (path, data) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+
+function say(el, kind, text) { clear(el); el.append(h("div", { class: `msg ${kind}`, role: kind === "err" ? "alert" : "status" }, text)); }
+
+function table(columns, rows) {
+  if (!rows.length) return h("p", { class: "muted" }, "Nothing here yet.");
+  return h("table", {},
+    h("thead", {}, h("tr", {}, columns.map((c) => h("th", { class: c.num ? "num" : "" }, c.label)))),
+    h("tbody", {}, rows.map((r) => h("tr", {}, columns.map((c) => h("td", { class: c.num ? "num" : "" }, c.cell(r)))))));
+}
+
+// ---------- state ----------
+let products = [], stores = [];
+const storeById = (id) => stores.find((s) => s.id === id);
+const storeLabel = (s) => (s ? `${s.name} — ${s.location}` : "?");
+
+function fillSelect(sel, items, label) {
+  const previous = sel.value;
+  clear(sel);
+  for (const it of items) sel.append(h("option", { value: it.id }, label(it)));
+  if (items.some((i) => String(i.id) === previous)) sel.value = previous;
+}
+
+async function loadLists() {
+  [products, stores] = await Promise.all([api("/products"), api("/stores")]);
+  for (const id of ["#a-product", "#h-product", "#p-product"]) fillSelect($(id), products, (p) => `${p.name} (${p.brand})`);
+  fillSelect($("#p-store"), stores, storeLabel);
+  fillSelect($("#prod-store"), stores, storeLabel);
+  $("#prod-store").prepend(h("option", { value: "" }, "— no store —"));
+  if (!stores.some((s) => String(s.id) === $("#prod-store").dataset.chosen)) $("#prod-store").value = "";
+  renderProducts();
+  renderStores();
+}
+
+// ---------- tabs ----------
+const TABS = [["analysis", "Analysis"], ["add", "Add price"], ["products", "Products"], ["stores", "Stores"], ["import", "Import CSV"]];
+function showTab(name) {
+  for (const [id] of TABS) $(`#tab-${id}`).hidden = id !== name;
+  for (const b of $("#tabs").children) b.setAttribute("aria-selected", String(b.dataset.tab === name));
+}
+for (const [id, label] of TABS) {
+  $("#tabs").append(h("button", { role: "tab", "data-tab": id, onclick: () => showTab(id) }, label));
+}
+
+// ---------- analysis ----------
+function windowDays(input) {
+  const n = parseInt(input.value, 10);
+  return Number.isFinite(n) ? Math.min(365, Math.max(1, n)) : 30;
+}
+
+async function analyse() {
+  const out = $("#a-out");
+  const id = $("#a-product").value;
+  if (!id) return say(out, "info", "Add a product first.");
+  const days = windowDays($("#a-days"));
+  $("#a-days").value = days;
+  const q = `?max_age_days=${days}`;
+  try {
+    const [cheapest, average, highest, list] = await Promise.all([
+      api(`/products/${id}/cheapest${q}`), api(`/products/${id}/prices/average${q}`),
+      api(`/products/${id}/prices/highest${q}`), api(`/products/${id}/prices${q}`),
+    ]);
+    clear(out);
+    out.append(
+      h("div", { class: "stats", style: "margin-top:12px" },
+        h("div", { class: "stat best" }, h("div", { class: "k" }, "Cheapest"), h("div", { class: "v" }, money(cheapest.price)),
+          h("div", { class: "s" }, `${storeLabel(cheapest.store)} · ${showDate(cheapest.date)}`)),
+        h("div", { class: "stat" }, h("div", { class: "k" }, "Average"), h("div", { class: "v" }, money(average.average_price)),
+          h("div", { class: "s" }, "latest price of each store")),
+        h("div", { class: "stat" }, h("div", { class: "k" }, "Highest"), h("div", { class: "v" }, money(highest.highest_price)),
+          h("div", { class: "s" }, `${storeLabel(storeById(highest.store_id))} · ${showDate(highest.date)}`))),
+      h("div", { class: "table-wrap" }, table(
+        [{ label: "Date", cell: (p) => showDate(p.date) }, { label: "Store", cell: (p) => storeLabel(storeById(p.store_id)) },
+         { label: "Price", num: true, cell: (p) => money(p.price) }],
+        [...list.prices].sort((a, b) => b.date.localeCompare(a.date) || a.price - b.price))));
+  } catch (e) {
+    say(out, e.status === 404 ? "info" : "err",
+      e.status === 404 ? `No prices in the last ${days} days. Try a larger window or the history search below.` : e.message);
+  }
+}
+
+async function searchHistory() {
+  const out = $("#h-out");
+  const id = $("#h-product").value;
+  if (!id) return say(out, "info", "Add a product first.");
+  const params = new URLSearchParams();
+  if ($("#h-start").value) params.set("start_date", $("#h-start").value);
+  if ($("#h-end").value) params.set("end_date", $("#h-end").value);
+  try {
+    const r = await api(`/products/${id}/prices/history?${params}`);
+    clear(out);
+    out.append(h("div", { class: "stats", style: "margin-top:12px" },
+      h("div", { class: "stat best" }, h("div", { class: "k" }, "Cheapest in period"), h("div", { class: "v" }, money(r.cheapest.price)),
+        h("div", { class: "s" }, `${storeLabel(r.cheapest.store)} · ${showDate(r.cheapest.date)}`)),
+      h("div", { class: "stat" }, h("div", { class: "k" }, "Average"), h("div", { class: "v" }, money(r.average_price)),
+        h("div", { class: "s" }, `${r.count} price record${r.count === 1 ? "" : "s"}`)),
+      h("div", { class: "stat" }, h("div", { class: "k" }, "Highest"), h("div", { class: "v" }, money(r.highest_price)),
+        h("div", { class: "s" }, `${showDate(r.start_date)} → ${showDate(r.end_date)}`))));
+  } catch (e) {
+    say(out, e.status === 404 ? "info" : "err", e.status === 404 ? "No prices recorded in that period." : e.message);
+  }
+}
+
+$("#a-go").addEventListener("click", analyse);
+$("#a-product").addEventListener("change", analyse);
+$("#a-days").addEventListener("keydown", (e) => e.key === "Enter" && analyse());
+$("#h-go").addEventListener("click", searchHistory);
+$("#h-year").addEventListener("input", () => {
+  const y = $("#h-year").value;
+  if (/^\d{4}$/.test(y)) { $("#h-start").value = `${y}-01-01`; $("#h-end").value = `${y}-12-31`; }
+});
+for (const id of ["#h-start", "#h-end"]) $(id).addEventListener("input", () => { $("#h-year").value = ""; });
+
+// ---------- add price ----------
+$("#p-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const out = $("#p-out");
+  try {
+    const created = await post("/prices", {
+      product_id: Number($("#p-product").value), store_id: Number($("#p-store").value),
+      price: parseCents($("#p-price").value), date: $("#p-date").value,
+    });
+    say(out, "ok", `Saved ${money(created.price)} on ${showDate(created.date)} (price #${created.id}).`);
+    $("#p-price").value = "";
+    analyse();
+  } catch (e) { say(out, "err", e.message); }
+});
+
+// ---------- products ----------
+function renderProducts() {
+  const wrap = $("#prod-table");
+  clear(wrap);
+  wrap.append(table([{ label: "ID", cell: (p) => p.id }, { label: "Name", cell: (p) => p.name }, { label: "Brand", cell: (p) => p.brand }], products));
+}
+function syncProductStoreFields() {
+  const hasStore = $("#prod-store").value !== "";
+  $("#prod-price").disabled = !hasStore;
+  $("#prod-price").required = hasStore;
+  $("#prod-date").disabled = !hasStore;
+  $("#prod-date").required = hasStore;
+  if (hasStore && !$("#prod-date").value) $("#prod-date").value = today();
+}
+$("#prod-store").addEventListener("change", () => {
+  $("#prod-store").dataset.chosen = $("#prod-store").value;
+  syncProductStoreFields();
+});
+
+$("#prod-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const out = $("#prod-out");
+  try {
+    const data = { name: $("#prod-name").value.trim(), brand: $("#prod-brand").value.trim() };
+    const storeId = $("#prod-store").value;
+    if (storeId) {
+      data.store_id = Number(storeId);
+      data.price = parseCents($("#prod-price").value);
+      data.date = $("#prod-date").value;
+    }
+    const p = await post("/products", data);
+    say(out, "ok", p.initial_price
+      ? `Added "${p.name}" (id ${p.id}) at ${storeLabel(storeById(p.initial_price.store_id))} for ${money(p.initial_price.price)}.`
+      : `Added "${p.name}" (id ${p.id}).`);
+    ev.target.reset();
+    $("#prod-store").dataset.chosen = "";
+    await loadLists();
+    syncProductStoreFields();
+    analyse();
+  } catch (e) {
+    const dup = /already exists/.test(e.message);
+    say(out, "err", dup ? `${e.message}. To record it at another store, use the "Add price" tab.` : e.message);
+  }
+});
+
+// ---------- stores ----------
+function renderStores() {
+  const wrap = $("#store-table");
+  clear(wrap);
+  wrap.append(table([{ label: "ID", cell: (s) => s.id }, { label: "Name", cell: (s) => s.name }, { label: "Location", cell: (s) => s.location },
+    { label: "", cell: (s) => h("button", { class: "link", onclick: () => openStore(s.id) }, "View prices") }], stores));
+  api("/stores/count").then((r) => { $("#store-title").textContent = `Stores (${r.count})`; }).catch(() => {});
+}
+let openStoreId = null;
+async function openStore(id) {
+  openStoreId = id;
+  const s = storeById(id);
+  $("#store-prices-card").hidden = false;
+  $("#store-prices-title").textContent = `Prices at ${storeLabel(s)}`;
+  const wrap = $("#store-prices");
+  const days = windowDays($("#sp-days"));
+  try {
+    const r = await api(`/stores/${id}/prices?max_age_days=${days}`);
+    clear(wrap);
+    const name = (pid) => { const p = products.find((x) => x.id === pid); return p ? `${p.name} (${p.brand})` : "?"; };
+    wrap.append(table([{ label: "Date", cell: (p) => showDate(p.date) }, { label: "Product", cell: (p) => name(p.product_id) },
+      { label: "Price", num: true, cell: (p) => money(p.price) }], [...r.prices].sort((a, b) => b.date.localeCompare(a.date))));
+  } catch (e) { say(wrap, "err", e.message); }
+}
+$("#sp-go").addEventListener("click", () => openStoreId && openStore(openStoreId));
+$("#store-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const out = $("#store-out");
+  try {
+    const s = await post("/stores", { name: $("#store-name").value.trim(), location: $("#store-location").value.trim() });
+    say(out, "ok", `Added "${s.name}" (id ${s.id}).`);
+    ev.target.reset();
+    await loadLists();
+  } catch (e) { say(out, "err", e.message); }
+});
+
+// ---------- import csv ----------
+const MAX_UPLOAD = 20 * 1024 * 1024;
+let checkedKey = null; // identifies the file+options that were checked successfully
+
+const fileKey = () => {
+  const f = $("#i-file").files[0];
+  return f ? `${f.name}|${f.size}|${f.lastModified}|${$("#i-cents").checked}` : null;
+};
+
+function resetImport() {
+  checkedKey = null;
+  $("#i-check").disabled = !$("#i-file").files[0];
+  $("#i-import").disabled = true;
+  clear($("#i-out"));
+}
+$("#i-file").addEventListener("change", resetImport);
+$("#i-cents").addEventListener("change", resetImport);
+
+async function sendCsv(dryRun) {
+  const f = $("#i-file").files[0];
+  if (!f) throw new Error("Choose a CSV file first.");
+  if (f.size > MAX_UPLOAD) throw new Error("The file is larger than 20 MB.");
+  const body = new FormData();
+  body.append("file", f);
+  return api(`/imports?dry_run=${dryRun}&cents=${$("#i-cents").checked}`, { method: "POST", body });
+}
+
+function stat(label, value, sub, cls) {
+  return h("div", { class: `stat ${cls || ""}` }, h("div", { class: "k" }, label), h("div", { class: "v" }, value), sub ? h("div", { class: "s" }, sub) : null);
+}
+
+function renderImport(r, done) {
+  const out = $("#i-out");
+  clear(out);
+  const bad = r.rejected_total;
+  out.append(
+    h("div", { class: `msg ${r.read === 0 ? "info" : bad === r.read ? "err" : "ok"}`, role: "status" },
+      done ? `Imported ${r.filename}.` : `Checked ${r.filename}: ${r.read} rows read. Nothing has been saved yet.`),
+    h("div", { class: "stats", style: "margin-top:12px" },
+      stat(done ? "Created" : "Would create", r.created, `${r.new_products} new products · ${r.new_stores} new stores`, "best"),
+      stat(done ? "Updated" : "Would update", r.updated, "same product, store and date, new price"),
+      stat("Unchanged", r.unchanged, "already in the database"),
+      stat("Rejected", bad, bad ? "see the reasons below" : "all rows are valid")),
+    h("p", { class: "hint" }, "Columns found: ", Object.entries(r.columns).map(([k, v]) => `${k} ← "${v}"`).join(" · ")));
+  if (bad) {
+    const cols = r.rejected.length ? Object.keys(r.rejected[0].row) : [];
+    out.append(
+      h("h2", { style: "margin-top:16px" }, `Rejected rows (${bad})`),
+      h("div", { class: "table-wrap" }, table(
+        [{ label: "Line", num: true, cell: (x) => x.line }, { label: "Reason", cell: (x) => x.reason },
+         { label: "Row", cell: (x) => cols.map((c) => x.row[c]).join(" | ") }], r.rejected)),
+      bad > r.rejected.length ? h("p", { class: "hint" }, `Showing the first ${r.rejected.length}.`) : null);
+  }
+}
+
+$("#i-check").addEventListener("click", async () => {
+  const out = $("#i-out");
+  $("#i-import").disabled = true;
+  checkedKey = null;
+  say(out, "info", "Checking…");
+  try {
+    const r = await sendCsv(true);
+    renderImport(r, false);
+    if (r.created + r.updated > 0) { checkedKey = fileKey(); $("#i-import").disabled = false; }
+  } catch (e) { say(out, "err", e.message); }
+});
+
+$("#i-import").addEventListener("click", async () => {
+  const out = $("#i-out");
+  if (!checkedKey || checkedKey !== fileKey()) return say(out, "err", "Check the file again before importing.");
+  $("#i-import").disabled = true;
+  $("#i-check").disabled = true;
+  say(out, "info", "Importing…");
+  try {
+    const r = await sendCsv(false);
+    renderImport(r, true);
+    checkedKey = null;
+    await loadLists();
+    analyse();
+  } catch (e) { say(out, "err", e.message); $("#i-check").disabled = false; }
+});
+
+// ---------- start ----------
+async function start() {
+  showTab("analysis");
+  $("#p-date").value = today();
+  try {
+    await api("/health");
+    $("#health-dot").classList.add("ok");
+    $("#health-text").textContent = "API online";
+  } catch {
+    $("#health-dot").classList.add("down");
+    $("#health-text").textContent = "API offline";
+    return;
+  }
+  await loadLists();
+  if (products.length) { analyse(); }
+  else say($("#a-out"), "info", "No products yet. Add some in the Products tab, or import a CSV with: uv run python -m app.importer file.csv");
+}
+start();
+</script>
+</body>
+</html>

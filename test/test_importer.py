@@ -232,3 +232,47 @@ class TestCli:
         assert main([str(bad)]) == 1
         assert "missing columns" in capsys.readouterr().err
         assert main([str(tmp_path / "nope.csv")]) == 1
+
+
+class TestDryRun:
+    def test_reports_but_saves_nothing(self, tmp_path, session):
+        path = write_csv(
+            tmp_path / "p.csv",
+            "Milk,B,l,Store C,City C,5.49,2026-10-20",
+            "Milk,B,l,Store C,City C,abc,2026-10-20",
+        )
+        result = import_csv(path, session, today=TODAY, dry_run=True)
+        assert result.dry_run is True
+        assert (result.created, result.new_products, result.new_stores, len(result.rejected)) == (1, 1, 1, 1)
+        assert session.exec(select(Product).where(Product.name == "Milk")).first() is None
+        assert session.exec(select(Store).where(Store.name == "Store C")).first() is None
+        assert len(session.exec(select(Price)).all()) == 4
+
+    def test_same_numbers_as_the_real_import(self, tmp_path, session):
+        path = write_csv(
+            tmp_path / "p.csv",
+            "Milk,B,l,Store C,City C,5.49,2026-10-20",
+            "Rice 5kg,Brand A,kg,Store A,City A,25.00,2026-10-02",
+            "Rice 5kg,Brand A,kg,Store A,City A,20.00,2026-10-02",
+        )
+        dry = import_csv(path, session, today=TODAY, dry_run=True)
+        real = import_csv(path, session, today=TODAY)
+        fields = ("read", "created", "updated", "unchanged", "new_products", "new_stores")
+        assert [getattr(dry, f) for f in fields] == [getattr(real, f) for f in fields]
+
+    def test_exposes_detected_columns(self, tmp_path, session):
+        path = write_csv(tmp_path / "p.csv", "Milk,B,l,S,C,5.49,2026-10-20")
+        result = import_csv(path, session, today=TODAY, dry_run=True)
+        assert result.columns["location"] == "city"
+
+
+class TestMessyRows:
+    def test_rows_with_extra_or_missing_cells(self, tmp_path, session):
+        path = tmp_path / "p.csv"
+        path.write_text(
+            f"{HEADER}\nMilk,B,l,S,C,5.49,2026-10-20,EXTRA\nShort,B,l\n", encoding="utf-8"
+        )
+        result = import_csv(path, session, today=TODAY)
+        assert (result.created, len(result.rejected)) == (1, 1)
+        out = write_rejected(path, result)
+        assert "Short" in out.read_text(encoding="utf-8")

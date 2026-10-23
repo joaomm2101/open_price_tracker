@@ -1,8 +1,12 @@
+import csv
+import io
 from contextlib import asynccontextmanager
 from datetime import date
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlmodel import Session, col, func, select
 
 from app.database import create_db_and_tables, get_session
@@ -14,6 +18,7 @@ from app.logic import (
     get_cheapest_price,
     get_current_prices,
 )
+from app.importer import CsvFormatError, import_stream
 from app.models import Price, Product, Store
 from app.schemas import PriceCreate, ProductCreate, StoreCreate
 
@@ -25,6 +30,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+STATIC_DIR = Path(__file__).parent / "static"
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_REJECTED_SHOWN = 200
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
@@ -77,6 +86,11 @@ def current_product_prices(
     return current
 
 
+@app.get("/", include_in_schema=False)
+def frontend():
+    return FileResponse(STATIC_DIR / "index.html")
+
+
 @app.get("/health")
 def get_health():
     return {"status": "ok"}
@@ -89,6 +103,10 @@ def get_products(session: SessionDep):
 
 @app.post("/products", status_code=201)
 def create_product(product: ProductCreate, session: SessionDep):
+    """
+    Cria um produto. Se `store_id` e `price` vierem, cria junto o primeiro preço
+    dele nessa loja; tudo ou nada: se a loja não existir, nada é gravado.
+    """
     existing = session.exec(
         select(Product).where(
             Product.name == product.name, Product.brand == product.brand
@@ -97,11 +115,31 @@ def create_product(product: ProductCreate, session: SessionDep):
     if existing:
         raise HTTPException(status_code=400, detail="Product already exists")
 
-    new_product = Product(**product.model_dump())
+    if product.store_id is not None:
+        find_store(session, product.store_id)
+        if product.date > date.today():
+            raise HTTPException(status_code=400, detail="Price date cannot be in the future")
+
+    new_product = Product(name=product.name, brand=product.brand)
     session.add(new_product)
+    session.flush()  # gera o id do produto, sem confirmar ainda
+
+    first_price = None
+    if product.store_id is not None:
+        first_price = Price(
+            product_id=new_product.id,
+            store_id=product.store_id,
+            price=product.price,
+            date=product.date,
+        )
+        session.add(first_price)
+
     session.commit()
     session.refresh(new_product)
-    return new_product
+    if first_price is None:
+        return new_product
+    session.refresh(first_price)
+    return {**new_product.model_dump(), "initial_price": first_price}
 
 
 @app.get("/products/{product_id}")
@@ -269,3 +307,56 @@ def create_price(price: PriceCreate, session: SessionDep):
     session.commit()
     session.refresh(new_price)
     return new_price
+
+
+@app.post("/imports")
+def import_prices(
+    session: SessionDep,
+    file: Annotated[UploadFile, File(description="Arquivo CSV com os preços")],
+    dry_run: Annotated[
+        bool,
+        Query(description="true só confere o arquivo, sem gravar; false importa de verdade"),
+    ] = True,
+    cents: Annotated[
+        bool, Query(description="a coluna de preço já está em centavos inteiros")
+    ] = False,
+):
+    """
+    Confere ou importa um CSV de preços (veja `app/importer.py` para as colunas).
+
+    Por padrão é uma simulação (`dry_run=true`): devolve o que seria criado,
+    atualizado ou recusado, sem alterar o banco.
+    """
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File is larger than 20 MB")
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode("cp1252", errors="replace")  # exportações do Excel em pt-BR
+
+    try:
+        result = import_stream(
+            io.StringIO(text, newline=""), session, cents=cents, dry_run=dry_run
+        )
+    except CsvFormatError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except csv.Error as error:
+        raise HTTPException(status_code=422, detail=f"Not a valid CSV file: {error}") from error
+
+    return {
+        "filename": file.filename,
+        "dry_run": result.dry_run,
+        "columns": result.columns,
+        "read": result.read,
+        "created": result.created,
+        "updated": result.updated,
+        "unchanged": result.unchanged,
+        "new_products": result.new_products,
+        "new_stores": result.new_stores,
+        "rejected_total": len(result.rejected),
+        "rejected": [
+            {"line": line, "reason": reason, "row": row}
+            for line, reason, row in result.rejected[:MAX_REJECTED_SHOWN]
+        ],
+    }

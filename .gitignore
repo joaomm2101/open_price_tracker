@@ -29,6 +29,10 @@ htmlcov/
 *.sql.gz
 *.dump
 
+# Price data you import (and the *.rejected.csv reports the importer writes next to it)
+*.csv
+*.tsv
+
 # Secrets and local configuration (never commit real credentials)
 .env
 .env.*

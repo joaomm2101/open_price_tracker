@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import TextIO
 
 from sqlmodel import Session, select
 
@@ -46,6 +47,8 @@ class ImportResult:
     unchanged: int = 0
     new_products: int = 0
     new_stores: int = 0
+    dry_run: bool = False
+    columns: dict[str, str] = field(default_factory=dict)  # coluna lógica -> cabeçalho do arquivo
     rejected: list[tuple[int, str, dict]] = field(default_factory=list)  # (linha, motivo, linha original)
 
 
@@ -118,15 +121,25 @@ def _open_reader(handle) -> csv.DictReader:
     return csv.DictReader(handle, dialect=dialect)
 
 
-def import_csv(
-    path: str | Path,
+def import_csv(path: str | Path, session: Session, **options) -> ImportResult:
+    """Importa um CSV do disco. As opções são as de `import_stream`."""
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        return import_stream(handle, session, **options)
+
+
+def import_stream(
+    handle: TextIO,
     session: Session,
     cents: bool = False,
     today: date | None = None,
     batch_size: int = BATCH_SIZE,
+    dry_run: bool = False,
 ) -> ImportResult:
     """
     Lê o CSV linha a linha e grava produtos, lojas e preços.
+
+    Com `dry_run=True` faz tudo igual, mas desfaz no final: serve para conferir
+    o arquivo (o que seria criado, atualizado ou recusado) sem gravar nada.
 
     - Produtos e lojas que já existem (ignorando maiúsculas) são reaproveitados.
     - Reimportar o mesmo arquivo não duplica: para o mesmo produto, loja e data,
@@ -134,7 +147,7 @@ def import_csv(
     - Linhas inválidas não interrompem a importação; vão para `result.rejected`.
     """
     today = today or date.today()
-    result = ImportResult()
+    result = ImportResult(dry_run=dry_run)
 
     products = {
         (p.name.casefold(), p.brand.casefold()): p.id for p in session.exec(select(Product))
@@ -143,71 +156,76 @@ def import_csv(
         (s.name.casefold(), s.location.casefold()): s.id for s in session.exec(select(Store))
     }
 
-    with open(path, newline="", encoding="utf-8-sig") as handle:
-        reader = _open_reader(handle)
-        columns = map_columns(reader.fieldnames)
+    reader = _open_reader(handle)
+    columns = map_columns(reader.fieldnames)
+    result.columns = columns
 
-        for row in reader:
-            result.read += 1
-            line = reader.line_num
-            try:
-                name = _clean(row[columns["product"]])
-                brand = _clean(row[columns["brand"]])
-                store_name = _clean(row[columns["store"]])
-                location = _clean(row[columns["location"]])
-                if not (name and brand and store_name and location):
-                    raise ValueError("product, brand, store and location are required")
-                price = parse_price(row[columns["price"]], cents)
-                day = parse_date(row[columns["date"]])
-                if day > today:
-                    raise ValueError(f"date is in the future: {day}")
+    for row in reader:
+        # Colunas a mais caem na chave None e colunas a menos vêm como None.
+        row = {k: ("" if v is None else v) for k, v in row.items() if k is not None}
+        result.read += 1
+        line = reader.line_num
+        try:
+            name = _clean(row[columns["product"]])
+            brand = _clean(row[columns["brand"]])
+            store_name = _clean(row[columns["store"]])
+            location = _clean(row[columns["location"]])
+            if not (name and brand and store_name and location):
+                raise ValueError("product, brand, store and location are required")
+            price = parse_price(row[columns["price"]], cents)
+            day = parse_date(row[columns["date"]])
+            if day > today:
+                raise ValueError(f"date is in the future: {day}")
 
-                product_key = (name.casefold(), brand.casefold())
-                if product_key not in products:
-                    product = Product(name=name, brand=brand)
-                    session.add(product)
-                    session.flush()
-                    products[product_key] = product.id
-                    result.new_products += 1
+            product_key = (name.casefold(), brand.casefold())
+            if product_key not in products:
+                product = Product(name=name, brand=brand)
+                session.add(product)
+                session.flush()
+                products[product_key] = product.id
+                result.new_products += 1
 
-                store_key = (store_name.casefold(), location.casefold())
-                if store_key not in stores:
-                    store = Store(name=store_name, location=location)
-                    session.add(store)
-                    session.flush()
-                    stores[store_key] = store.id
-                    result.new_stores += 1
+            store_key = (store_name.casefold(), location.casefold())
+            if store_key not in stores:
+                store = Store(name=store_name, location=location)
+                session.add(store)
+                session.flush()
+                stores[store_key] = store.id
+                result.new_stores += 1
 
-                existing = session.exec(
-                    select(Price).where(
-                        Price.product_id == products[product_key],
-                        Price.store_id == stores[store_key],
-                        Price.date == day,
+            existing = session.exec(
+                select(Price).where(
+                    Price.product_id == products[product_key],
+                    Price.store_id == stores[store_key],
+                    Price.date == day,
+                )
+            ).first()
+            if existing is None:
+                session.add(
+                    Price(
+                        product_id=products[product_key],
+                        store_id=stores[store_key],
+                        price=price,
+                        date=day,
                     )
-                ).first()
-                if existing is None:
-                    session.add(
-                        Price(
-                            product_id=products[product_key],
-                            store_id=stores[store_key],
-                            price=price,
-                            date=day,
-                        )
-                    )
-                    result.created += 1
-                elif existing.price != price:
-                    existing.price = price
-                    session.add(existing)
-                    result.updated += 1
-                else:
-                    result.unchanged += 1
-            except ValueError as error:
-                result.rejected.append((line, str(error), row))
+                )
+                result.created += 1
+            elif existing.price != price:
+                existing.price = price
+                session.add(existing)
+                result.updated += 1
+            else:
+                result.unchanged += 1
+        except ValueError as error:
+            result.rejected.append((line, str(error), row))
 
-            if result.read % batch_size == 0:
-                session.commit()
+        if not dry_run and result.read % batch_size == 0:
+            session.commit()
 
-    session.commit()
+    if dry_run:
+        session.rollback()
+    else:
+        session.commit()
     return result
 
 
