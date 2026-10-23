@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments (uv recreates it with `uv sync`)
+.venv/
+venv/
+env/
+
+# Tests, coverage and tooling caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Local databases (SQLite dev file, dumps and journals)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sql.gz
+*.dump
+
+# Secrets and local configuration (never commit real credentials)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+docker-compose.override.yml
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

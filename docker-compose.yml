@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      # Senha só para desenvolvimento local; sobrescreva com POSTGRES_PASSWORD=... no ambiente.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: open_price_tracker
+    ports:
+      # Só localhost: nunca exponha o banco para a rede.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      # Cria também o banco usado pelos testes (só roda na primeira inicialização).
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+
+volumes:
+  pgdata:
