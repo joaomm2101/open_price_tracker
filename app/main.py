@@ -3,7 +3,7 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from sqlmodel import Session, select
+from sqlmodel import Session, col, func, select
 
 from app.database import create_db_and_tables, get_session
 from app.logic import (
@@ -115,6 +115,68 @@ def get_product_prices(
 ):
     prices = filter_recent_prices(product_prices(session, product_id), max_age_days)
     return {"product_id": product_id, "max_age_days": max_age_days, "prices": prices}
+
+
+@app.get("/products/{product_id}/prices/history")
+def get_price_history(
+    product_id: int,
+    session: SessionDep,
+    start_date: Annotated[
+        date | None, Query(description="Início do período (inclusivo), AAAA-MM-DD")
+    ] = None,
+    end_date: Annotated[
+        date | None, Query(description="Fim do período (inclusivo), AAAA-MM-DD")
+    ] = None,
+):
+    """
+    Resumo dos preços de um produto em qualquer período, inclusive antigo.
+
+    Diferente de `/cheapest`, aqui valem todos os registros do período (o menor
+    preço já registrado), não só o último preço de cada loja. Sem `start_date`
+    ou `end_date`, o período fica aberto naquela ponta.
+    """
+    find_product(session, product_id)
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(
+            status_code=422, detail="start_date must not be after end_date"
+        )
+
+    conditions = [Price.product_id == product_id]
+    if start_date:
+        conditions.append(Price.date >= start_date)
+    if end_date:
+        conditions.append(Price.date <= end_date)
+
+    # Menor preço do período; em caso de empate, o mais recente.
+    cheapest = session.exec(
+        select(Price)
+        .where(*conditions)
+        .order_by(col(Price.price), col(Price.date).desc(), col(Price.id).desc())
+        .limit(1)
+    ).first()
+    if cheapest is None:
+        raise HTTPException(
+            status_code=404, detail="No prices found in the given period"
+        )
+
+    count, average, highest = session.exec(
+        select(func.count(Price.id), func.avg(Price.price), func.max(Price.price)).where(
+            *conditions
+        )
+    ).one()
+    return {
+        "product_id": product_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "count": count,
+        "cheapest": {
+            "price": cheapest.price,
+            "date": cheapest.date,
+            "store": find_store(session, cheapest.store_id),
+        },
+        "average_price": round(average),
+        "highest_price": highest,
+    }
 
 
 @app.get("/products/{product_id}/prices/average")

@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+import pytest
 from sqlmodel import select
 
 from app.models import Price, Product, Store
@@ -239,3 +240,104 @@ class TestCreatePrice:
     def test_invalid_date_format(self, client):
         r = client.post("/prices", json={"product_id": 1, "store_id": 1, "price": 100, "date": "xx"})
         assert r.status_code == 422
+
+
+class TestPriceHistory:
+    @staticmethod
+    def add(client, price, day, store_id=1, product_id=1):
+        r = client.post(
+            "/prices",
+            json={"product_id": product_id, "store_id": store_id, "price": price, "date": day},
+        )
+        assert r.status_code == 201
+
+    def test_cheapest_in_an_old_year(self, client):
+        self.add(client, 1800, "2014-03-10", store_id=1)
+        self.add(client, 1500, "2014-08-01", store_id=2)
+        self.add(client, 900, "2015-01-02", store_id=1)  # fora de 2014
+        r = client.get("/products/1/prices/history?start_date=2014-01-01&end_date=2014-12-31")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 2
+        assert body["cheapest"] == {
+            "price": 1500,
+            "date": "2014-08-01",
+            "store": {"id": 2, "name": "Store B", "location": "City B"},
+        }
+        assert body["average_price"] == 1650
+        assert body["highest_price"] == 1800
+        assert body["start_date"] == "2014-01-01"
+
+    def test_uses_every_record_not_only_latest_per_store(self, client):
+        self.add(client, 1000, "2014-01-10", store_id=1)
+        self.add(client, 2000, "2014-06-10", store_id=1)
+        body = client.get(
+            "/products/1/prices/history?start_date=2014-01-01&end_date=2014-12-31"
+        ).json()
+        assert (body["count"], body["cheapest"]["price"], body["average_price"]) == (2, 1000, 1500)
+
+    def test_boundaries_are_inclusive(self, client):
+        self.add(client, 1000, "2014-01-01")
+        self.add(client, 1100, "2014-12-31")
+        self.add(client, 1200, "2013-12-31")
+        self.add(client, 1300, "2015-01-01")
+        body = client.get(
+            "/products/1/prices/history?start_date=2014-01-01&end_date=2014-12-31"
+        ).json()
+        assert body["count"] == 2
+
+    def test_single_day(self, client):
+        self.add(client, 1000, "2014-05-05")
+        body = client.get(
+            "/products/1/prices/history?start_date=2014-05-05&end_date=2014-05-05"
+        ).json()
+        assert (body["count"], body["cheapest"]["price"]) == (1, 1000)
+
+    def test_open_ended_periods(self, client):
+        self.add(client, 100, "2014-05-05")
+        everything = client.get("/products/1/prices/history").json()
+        assert everything["count"] == 3  # 2 do exemplo + 1 antigo
+        assert everything["cheapest"]["price"] == 100
+        assert everything["start_date"] is None and everything["end_date"] is None
+        only_from = client.get("/products/1/prices/history?start_date=2020-01-01").json()
+        assert only_from["count"] == 2
+        only_until = client.get("/products/1/prices/history?end_date=2014-12-31").json()
+        assert only_until["count"] == 1
+
+    def test_tie_prefers_most_recent(self, client):
+        self.add(client, 700, "2014-02-01", store_id=1)
+        self.add(client, 700, "2014-09-01", store_id=2)
+        body = client.get(
+            "/products/1/prices/history?start_date=2014-01-01&end_date=2014-12-31"
+        ).json()
+        assert body["cheapest"]["date"] == "2014-09-01"
+        assert body["cheapest"]["store"]["id"] == 2
+
+    def test_other_products_are_not_mixed_in(self, client):
+        self.add(client, 50, "2014-05-05", product_id=2)
+        body = client.get("/products/1/prices/history?end_date=2014-12-31").status_code
+        assert body == 404
+
+    def test_old_prices_still_reachable_while_cheapest_ignores_them(self, client):
+        self.add(client, 100, "2014-05-05")
+        assert client.get("/products/1/cheapest").json()["price"] == 2000
+        assert client.get("/products/1/prices/history").json()["cheapest"]["price"] == 100
+
+    def test_no_prices_in_period(self, client):
+        r = client.get("/products/1/prices/history?start_date=1999-01-01&end_date=1999-12-31")
+        assert r.status_code == 404
+        assert "No prices" in r.json()["detail"]
+
+    def test_future_period_is_just_empty(self, client):
+        assert client.get("/products/1/prices/history?start_date=2999-01-01").status_code == 404
+
+    def test_start_after_end(self, client):
+        r = client.get("/products/1/prices/history?start_date=2015-01-01&end_date=2014-01-01")
+        assert r.status_code == 422
+
+    @pytest.mark.parametrize("value", ["2014", "2014-13-01", "yesterday", "01/02/2014"])
+    def test_invalid_dates(self, client, value):
+        assert client.get(f"/products/1/prices/history?start_date={value}").status_code == 422
+
+    def test_product_not_found(self, client):
+        assert client.get("/products/99/prices/history").status_code == 404

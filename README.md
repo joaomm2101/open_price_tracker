@@ -22,6 +22,15 @@ Cria o arquivo `open_price_tracker.db` automaticamente.
 Depois de mudar `app/models.py`, gere a migração com
 `uv run alembic revision --autogenerate -m "descrição"`.
 
+## Consultar preços em qualquer período
+
+    GET /products/{id}/prices/history?start_date=2014-01-01&end_date=2014-12-31
+
+Retorna o menor preço já registrado no período (com loja e data), a média, o maior preço e
+a quantidade de registros. `start_date` e `end_date` são opcionais e inclusivos; sem eles o
+período fica aberto. Já `/cheapest` e `/prices/average|highest` olham só os preços recentes
+(`max_age_days`, padrão 30).
+
 ## Importar preços de um CSV
 
     uv run python -m app.importer precos.csv          # preço em reais, ex.: 19,09 ou 19.09
