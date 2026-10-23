@@ -1,5 +1,7 @@
 # Open Price Tracker
 
+[![Tests](https://github.com/joaomm2101/open_price_tracker/actions/workflows/tests.yml/badge.svg)](https://github.com/joaomm2101/open_price_tracker/actions/workflows/tests.yml)
+
 API (FastAPI + SQLModel) para acompanhar preços de produtos em lojas. Os preços são
 guardados como **inteiros em centavos** (`2050` = 20,50) e só preços recentes
 (`max_age_days`, padrão 30) entram nas consultas.
