@@ -22,6 +22,20 @@ Cria o arquivo `open_price_tracker.db` automaticamente.
 Depois de mudar `app/models.py`, gere a migração com
 `uv run alembic revision --autogenerate -m "descrição"`.
 
+## Importar preços de um CSV
+
+    uv run python -m app.importer precos.csv          # preço em reais, ex.: 19,09 ou 19.09
+    uv run python -m app.importer precos.csv --cents  # preço já em centavos, ex.: 1909
+
+Colunas: `product_name, brand, store_name, city, price, date` (também aceita `product`,
+`store`, `location` e nomes em português; colunas extras como `unit` são ignoradas).
+Datas em `AAAA-MM-DD` ou `DD/MM/AAAA`; separador `,`, `;` ou tab.
+
+- Produtos e lojas são criados se ainda não existirem (maiúsculas/minúsculas são ignoradas).
+- Reimportar o mesmo arquivo não duplica: o mesmo produto, loja e data atualiza o preço.
+- Linhas inválidas não interrompem a importação; são gravadas em `<arquivo>.rejected.csv`
+  com o motivo. Usa o banco de `DATABASE_URL` (SQLite por padrão).
+
 ## Testes
 
     uv run pytest                                  # SQLite em memória
