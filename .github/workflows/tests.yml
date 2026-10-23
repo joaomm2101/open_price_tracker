@@ -39,7 +39,7 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/open_price_tracker
-      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/open_price_tracker
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/open_price_tracker_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -50,4 +50,8 @@ jobs:
         run: |
           uv run alembic upgrade head
           uv run alembic downgrade base
+      - name: Create test database
+        run: psql -h localhost -U postgres -c "CREATE DATABASE open_price_tracker_test"
+        env:
+          PGPASSWORD: postgres
       - run: uv run pytest -q
